@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 import os
 import os.path
+from io import TextIOWrapper
 
 class HardwarePWMException(Exception):
     pass
@@ -37,6 +38,12 @@ class HardwarePWM:
     _duty_cycle: float
     _hz: float
     chippath: str = "/sys/class/pwm/pwmchip0" # mostly here for testing
+    file_dict: dict[str, TextIOWrapper] = {}
+    per: int 
+    _export_path: str
+    _enable_path: str
+    _duty_cycle_path: str
+    _period_path: str
 
     def __init__(self, pwm_channel: int, hz: float, chip: int = 0) -> None:
 
@@ -47,6 +54,10 @@ class HardwarePWM:
         self.pwm_channel = pwm_channel
         self.pwm_dir = f"{self.chippath}/pwm{self.pwm_channel}"
         self._duty_cycle = 0
+        self._export_path = os.path.join(self.chippath, "export")
+        self._enable_path = os.path.join(self.pwm_dir, "enable")
+        self._duty_cycle_path = os.path.join(self.pwm_dir, "duty_cycle")
+        self._period_path = os.path.join(self.pwm_dir, "period")
 
         if not self.is_overlay_loaded():
             raise HardwarePWMException(
@@ -64,30 +75,35 @@ class HardwarePWM:
             except PermissionError:
                 continue
 
+    def __del__(self):
+        for file_handle in self.file_dict.values():
+            file_handle.close()
 
     def is_overlay_loaded(self) -> bool:
         return os.path.isdir(self.chippath)
 
     def is_export_writable(self) -> bool:
-        return os.access(os.path.join(self.chippath, "export"), os.W_OK)
+        return os.access(self._export_path, os.W_OK)
 
     def does_pwmX_exists(self) -> bool:
         return os.path.isdir(self.pwm_dir)
 
     def echo(self, message: int, file: str) -> None:
-        with open(file, "w") as f:
-            f.write(f"{message}\n")
+        if file not in self.file_dict:
+            self.file_dict[file] = open(file, "w")
+        self.file_dict[file].write(f"{message}\n")
+        self.file_dict[file].seek(0)
 
     def create_pwmX(self) -> None:
-        self.echo(self.pwm_channel, os.path.join(self.chippath, "export"))
+        self.echo(self.pwm_channel, self._export_path)
 
     def start(self, initial_duty_cycle: float) -> None:
         self.change_duty_cycle(initial_duty_cycle)
-        self.echo(1, os.path.join(self.pwm_dir, "enable"))
+        self.echo(1, self._enable_path)
 
     def stop(self) -> None:
         self.change_duty_cycle(0)
-        self.echo(0, os.path.join(self.pwm_dir, "enable"))
+        self.echo(0, self._enable_path)
 
     def change_duty_cycle(self, duty_cycle: float) -> None:
         """
@@ -98,11 +114,8 @@ class HardwarePWM:
         if not (0 <= duty_cycle <= 100):
             raise HardwarePWMException("Duty cycle must be between 0 and 100 (inclusive).")
         self._duty_cycle = duty_cycle
-        per = 1 / float(self._hz)
-        per *= 1000  # now in milliseconds
-        per *= 1_000_000  # now in nanoseconds
-        dc = int(per * duty_cycle / 100)
-        self.echo(dc, os.path.join(self.pwm_dir, "duty_cycle"))
+        dc = int(self.per * duty_cycle / 100)
+        self.echo(dc, self._duty_cycle_path)
 
     def change_frequency(self, hz: float) -> None:
         if hz < 0.1:
@@ -115,9 +128,7 @@ class HardwarePWM:
         if self._duty_cycle:
             self.change_duty_cycle(0)
 
-        per = 1 / float(self._hz)
-        per *= 1000  # now in milliseconds
-        per *= 1_000_000  # now in nanoseconds
-        self.echo(int(per), os.path.join(self.pwm_dir, "period"))
+        self.per = int(1 / float(self._hz) * 1000 * 1_000_000)
+        self.echo(self.per, self._period_path)
 
         self.change_duty_cycle(original_duty_cycle)
